@@ -21,6 +21,7 @@
 
 #include <cmath>
 #include <cstdlib>
+#include <ctime>
 #include <algorithm>
 #include <iostream>
 #include <sstream>
@@ -1818,8 +1819,9 @@ void VLP32cDecoder::index32sensorIDs() noexcept {
     }
 }
 
-std::vector<opendlv::proxy::PointCloudReading> VLP32cDecoder::decode(const std::string &data) noexcept {
-    std::vector<opendlv::proxy::PointCloudReading> retVal;
+std::pair<std::vector<opendlv::proxy::PointCloudReading>, cluon::data::TimeStamp> VLP32cDecoder::decode(const std::string &data) noexcept {
+    std::vector<opendlv::proxy::PointCloudReading> pointClouds;
+    cluon::data::TimeStamp sampleTimeStamp;
 
     if (1206 == data.size()) {
         // Decode VLP-32 data.
@@ -1864,9 +1866,9 @@ std::vector<opendlv::proxy::PointCloudReading> VLP32cDecoder::decode(const std::
                                .numberOfBitsForIntensity(m_intensityBitsMSB)
                                .typeOfVerticalAngularLayout(1); // Indicate VLP32c.
 
-                retVal.push_back(pointCloudPart1);
-                retVal.push_back(pointCloudPart2);
-                retVal.push_back(pointCloudPart3);
+                pointClouds.push_back(pointCloudPart1);
+                pointClouds.push_back(pointCloudPart2);
+                pointClouds.push_back(pointCloudPart3);
 
                 m_pointIndexCPC = 0;
                 m_startAzimuth = m_currentAzimuth;
@@ -1941,11 +1943,38 @@ std::vector<opendlv::proxy::PointCloudReading> VLP32cDecoder::decode(const std::
             }
         }
 
-        // TODO: Decode 4 bytes GPS time stamp.
+        if (3 == pointClouds.size()) {
+            // Completed point cloud; add timestamp.
+
+            // Decode 4 bytes GPS time stamp.
+            std::string tmp(data.data() + 1200, 4);
+            std::stringstream sstr(tmp);
+            uint32_t timeStampSinceFullHourInMicroseconds{0};
+            sstr.read(reinterpret_cast<char*>(&timeStampSinceFullHourInMicroseconds), sizeof(uint32_t));
+            timeStampSinceFullHourInMicroseconds = le32toh(timeStampSinceFullHourInMicroseconds);
+
+            // Get seconds for last full hour.
+            time_t secondsSinceEpoch = time(NULL);
+
+            struct tm timeBrokenDown{};
+            gmtime_r(&secondsSinceEpoch, &timeBrokenDown);
+
+            // Reset minutes and seconds to 0.
+            timeBrokenDown.tm_sec = 0;
+            timeBrokenDown.tm_min = 0;
+
+            time_t secondsSinceEpochWithMinAndSecsToZero = mktime(&timeBrokenDown);
+
+            // Add timestamp from sensor.
+            secondsSinceEpochWithMinAndSecsToZero += static_cast<time_t>(round(timeStampSinceFullHourInMicroseconds/(1000.0f*1000.0f)));
+
+            sampleTimeStamp.seconds(secondsSinceEpochWithMinAndSecsToZero)
+                           .microseconds(timeStampSinceFullHourInMicroseconds%(1000*1000));
+        }
 
         // Skip 2 blank bytes.
     }
 
-    return retVal;
+    return std::make_pair(pointClouds, sampleTimeStamp);
 }
 
